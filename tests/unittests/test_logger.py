@@ -5,7 +5,7 @@ from tap_google_sheets import schema
 
 
 class TestLogger(unittest.TestCase):
-    @mock.patch('tap_google_sheets.schema.LOGGER.warning')
+    @mock.patch('tap_google_sheets.schema.LOGGER.warn')
     def test_logger_message(self, mocked_logger):
         """
         Test if the logger statement is printed when the header row is empty and the sheet is being skipped.

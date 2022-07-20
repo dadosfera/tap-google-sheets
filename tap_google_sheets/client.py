@@ -116,15 +116,12 @@ def raise_for_error(response):
                 # There is nothing we can do here since Google has neither sent
                 # us a 2xx response nor a response content.
                 return
-            # Fetch the status code from the response object itself.
-            status_code = response.status_code
             response = response.json()
             if ('error' in response) or ('errorCode' in response):
-                # To form the error message, first, check for the message. If the message is not available, check for `error_description` in response.
-                # If both are not available, raise an Unknown Error.
-                message = 'HTTP-error-code: %s %s: %s' % (status_code, response.get('error', str(error)),
-                                      response.get('message',  response.get('error_description', 'Unknown Error')))
-                ex = get_exception_for_error_code(status_code)
+                message = '%s: %s' % (response.get('error', str(error)),
+                                      response.get('message', 'Unknown Error'))
+                error_code = response.get('error', {}).get('code')
+                ex = get_exception_for_error_code(error_code)
                 raise ex(message)
             raise GoogleError(error)
         except (ValueError, TypeError):
@@ -213,8 +210,7 @@ class GoogleClient: # pylint: disable=too-many-instance-attributes
     @backoff.on_exception(backoff.expo,
                           (Server5xxError, ConnectionError, Server429Error),
                           max_tries=7,
-                          factor=3,
-                          jitter=None)
+                          factor=3)
     @utils.ratelimit(100, 100)
     def request(self, method, path=None, url=None, api=None, **kwargs):
         self.get_access_token()
