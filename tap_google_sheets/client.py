@@ -212,8 +212,8 @@ class GoogleClient: # pylint: disable=too-many-instance-attributes
     #   100 request per 100 seconds per User
     @backoff.on_exception(backoff.expo,
                           (Server5xxError, ConnectionError, Server429Error),
-                          max_tries=15,
-                          factor=5)
+                          max_tries=7,
+                          factor=4)
     @utils.ratelimit(100, 100)
     def request(self, method, path=None, url=None, api=None, **kwargs):
         self.get_access_token()
