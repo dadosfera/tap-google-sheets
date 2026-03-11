@@ -9,6 +9,10 @@ from requests.exceptions import Timeout, ConnectionError
 
 BASE_URL = 'https://www.googleapis.com'
 GOOGLE_TOKEN_URI = 'https://oauth2.googleapis.com/token'
+GOOGLE_SCOPES = [
+    'https://www.googleapis.com/auth/spreadsheets.readonly',
+    'https://www.googleapis.com/auth/drive.readonly',
+]
 LOGGER = singer.get_logger()
 REQUEST_TIMEOUT = 300
 
@@ -131,19 +135,34 @@ def raise_for_error(response):
             raise GoogleError(error)
 
 class GoogleClient: # pylint: disable=too-many-instance-attributes
-    def __init__(self,
-                 client_id,
-                 client_secret,
-                 refresh_token,
-                 request_timeout=REQUEST_TIMEOUT,
-                 user_agent=None):
-        self.__client_id = client_id
-        self.__client_secret = client_secret
-        self.__refresh_token = refresh_token
-        self.__user_agent = user_agent
-        self.__access_token = None
-        self.__expires = None
-        self.__session = requests.Session()
+
+    @classmethod
+    def from_oauth(cls, client_id, client_secret, refresh_token,
+                   request_timeout=REQUEST_TIMEOUT, user_agent=None):
+        instance = cls(request_timeout=request_timeout, user_agent=user_agent)
+        instance._client_id = client_id
+        instance._client_secret = client_secret
+        instance._refresh_token = refresh_token
+        instance._refresh_access_token = instance._refresh_access_token_oauth
+        return instance
+
+    @classmethod
+    def from_service_account(cls, service_account_info,
+                             request_timeout=REQUEST_TIMEOUT, user_agent=None):
+        from google.oauth2 import service_account
+        instance = cls(request_timeout=request_timeout, user_agent=user_agent)
+        instance._sa_credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
+            scopes=GOOGLE_SCOPES,
+        )
+        instance._refresh_access_token = instance._refresh_access_token_service_account
+        return instance
+
+    def __init__(self, request_timeout=REQUEST_TIMEOUT, user_agent=None):
+        self._user_agent = user_agent
+        self._access_token = None
+        self._expires = None
+        self._session = requests.Session()
         self.base_url = None
         # if request_timeout is other than 0,"0" or "" then use request_timeout
         if request_timeout and float(request_timeout):
@@ -163,30 +182,37 @@ class GoogleClient: # pylint: disable=too-many-instance-attributes
         return self
 
     def __exit__(self, exception_type, exception_value, traceback):
-        self.__session.close()
+        self._session.close()
 
     @backoff.on_exception(backoff.expo,
                           Server5xxError,
                           max_tries=5,
                           factor=2)
     def get_access_token(self):
-        # The refresh_token never expires and may be used many times to generate each access_token
-        # Since the refresh_token does not expire, it is not included in get access_token response
-        if self.__access_token is not None and self.__expires > datetime.utcnow():
+        if self._access_token is not None and self._expires > datetime.utcnow():
             return
+        self._refresh_access_token()
 
+    def _refresh_access_token_service_account(self):
+        from google.auth.transport.requests import Request
+        self._sa_credentials.refresh(Request())
+        self._access_token = self._sa_credentials.token
+        self._expires = self._sa_credentials.expiry
+        LOGGER.info('Authorized via service account, token expires = {}'.format(self._expires))
+
+    def _refresh_access_token_oauth(self):
         headers = {}
-        if self.__user_agent:
-            headers['User-Agent'] = self.__user_agent
+        if self._user_agent:
+            headers['User-Agent'] = self._user_agent
 
-        response = self.__session.post(
+        response = self._session.post(
             url=GOOGLE_TOKEN_URI,
             headers=headers,
             data={
                 'grant_type': 'refresh_token',
-                'client_id': self.__client_id,
-                'client_secret': self.__client_secret,
-                'refresh_token': self.__refresh_token,
+                'client_id': self._client_id,
+                'client_secret': self._client_secret,
+                'refresh_token': self._refresh_token,
             },
             timeout=self.request_timeout)
 
@@ -197,9 +223,9 @@ class GoogleClient: # pylint: disable=too-many-instance-attributes
             raise_for_error(response)
 
         data = response.json()
-        self.__access_token = data['access_token']
-        self.__expires = datetime.utcnow() + timedelta(seconds=data['expires_in'])
-        LOGGER.info('Authorized, token expires = {}'.format(self.__expires))
+        self._access_token = data['access_token']
+        self._expires = datetime.utcnow() + timedelta(seconds=data['expires_in'])
+        LOGGER.info('Authorized, token expires = {}'.format(self._expires))
 
 
     # Backoff request for 5 times at an interval of 10 seconds when we get Timeout error
@@ -234,17 +260,17 @@ class GoogleClient: # pylint: disable=too-many-instance-attributes
 
         if 'headers' not in kwargs:
             kwargs['headers'] = {}
-        kwargs['headers']['Authorization'] = 'Bearer {}'.format(self.__access_token)
+        kwargs['headers']['Authorization'] = 'Bearer {}'.format(self._access_token)
 
-        if self.__user_agent:
-            kwargs['headers']['User-Agent'] = self.__user_agent
+        if self._user_agent:
+            kwargs['headers']['User-Agent'] = self._user_agent
 
         if method == 'POST':
             kwargs['headers']['Content-Type'] = 'application/json'
 
         with metrics.http_request_timer(endpoint) as timer:
             
-            response = self.__session.request(method, url, timeout=self.request_timeout, **kwargs)
+            response = self._session.request(method, url, timeout=self.request_timeout, **kwargs)
             timer.tags[metrics.Tag.http_status_code] = response.status_code
 
         if response.status_code >= 500:
